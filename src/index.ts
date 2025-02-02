@@ -282,8 +282,8 @@ async function htmlStreamWalker(
     }
 
     return waitChildren
-      ? streamInProgress
-      : streamInProgress && !node.hasChildNodes?.();
+      ? streamInProgress && !node.hasChildNodes?.()
+      : streamInProgress
   }
 
   return {
