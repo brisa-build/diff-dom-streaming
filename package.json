@@ -53,9 +53,9 @@
     "example:spa-like": "bun run ./examples/spa-like/index.ts"
   },
   "devDependencies": {
-    "typescript": "5.4.5",
-    "@types/bun": "1.1.0",
-    "bundlewatch": "0.3.3",
+    "typescript": "5.7.3",
+    "@types/bun": "1.2.2",
+    "bundlewatch": "0.4.0",
     "playwright": "1.43.1"
   }
 }
