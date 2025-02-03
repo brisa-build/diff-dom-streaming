@@ -281,6 +281,9 @@ async function htmlStreamWalker(
       parent = parent.parentElement;
     }
 
+    // Related issues to this ternary (hard to reproduce in a test):
+    // https://github.com/brisa-build/diff-dom-streaming/pull/15
+    // https://github.com/brisa-build/brisa/issues/739
     return waitChildren
       ? streamInProgress && !node.hasChildNodes?.()
       : streamInProgress
