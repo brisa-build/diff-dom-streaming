@@ -1,6 +1,6 @@
 {
   "name": "diff-dom-streaming",
-  "version": "0.6.5",
+  "version": "0.6.6",
   "bugs": "https://github.com/aralroca/diff-dom-streaming/issues",
   "description": "Diff DOM algorithm with streaming. Gets all modifications, insertions and removals between a DOM fragment and a stream HTML reader.",
   "keywords": [

@@ -257,7 +257,7 @@ async function htmlStreamWalker(
         nextNode = nextNode![field];
       }
 
-      if (nextNode) options.onNextNode?.(nextNode);
+      if (nextNode) await options.onNextNode?.(nextNode);
 
       const waitChildren = field === "firstChild";
 
