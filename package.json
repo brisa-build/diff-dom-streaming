@@ -1,6 +1,6 @@
 {
   "name": "diff-dom-streaming",
-  "version": "0.6.5",
+  "version": "0.6.6",
   "bugs": "https://github.com/aralroca/diff-dom-streaming/issues",
   "description": "Diff DOM algorithm with streaming. Gets all modifications, insertions and removals between a DOM fragment and a stream HTML reader.",
   "keywords": [
@@ -53,9 +53,9 @@
     "example:spa-like": "bun run ./examples/spa-like/index.ts"
   },
   "devDependencies": {
-    "typescript": "5.7.3",
-    "@types/bun": "1.2.2",
-    "bundlewatch": "0.4.0",
-    "playwright": "1.43.1"
+    "typescript": "5.8.3",
+    "@types/bun": "1.2.9",
+    "bundlewatch": "0.4.1",
+    "playwright": "1.51.1"
   }
 }

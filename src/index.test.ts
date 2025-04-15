@@ -1659,6 +1659,40 @@ describe("Diff test", () => {
       );
     });
 
+    it("should onNextNode execute in a sequential way when is async", async () => {
+      const results = await testDiff({
+        oldHTMLString: `
+        <div>foo</div>
+      `,
+        newHTMLStringChunks: ["<div scan>first</div>", "<div scan>second</div>", "<div scan>third</div>"],
+        registerWC: true,
+        onNextNode: `async (n) => {
+          if (!n?.hasAttribute?.('scan')) return
+          window.index ??= 1;
+          window.logs ??= '';
+          await new Promise((r) => setTimeout(() => {
+            window.logs += n.innerText + ' ';
+            r(true);
+          }, ++window.index * 50));
+        }`
+      });
+
+      expect(results[0]).toBe(
+        normalize(`
+        <html>
+          <head></head>
+          <body>
+            <div scan="">first</div>
+            <div scan="">second</div>
+            <div scan="">third</div>
+          </body>
+        </html>
+      `),
+      );
+
+      expect(results.at(-1)).toBe('first second third ')
+    });
+
     it("should add WC that modifies the DOM on connect it (old with key)", async () => {
       const [newHTML] = await testDiff({
         oldHTMLString: `
@@ -1689,6 +1723,7 @@ describe("Diff test", () => {
     transition = false,
     ignoreId = false,
     registerWC = false,
+    onNextNode,
   }: {
     oldHTMLString: string;
     newHTMLStringChunks: string[];
@@ -1697,9 +1732,10 @@ describe("Diff test", () => {
     transition?: boolean;
     ignoreId?: boolean;
     registerWC?: boolean;
-  }): Promise<[string, any[], Node[], boolean]> {
+    onNextNode?: string
+  }): Promise<[string, any[], Node[], boolean, string]> {
     await page.setContent(normalize(oldHTMLString));
-    const [mutations, streamNodes, transitionApplied] = await page.evaluate(
+    const [mutations, streamNodes, transitionApplied, logs] = await page.evaluate(
       async ([
         diffCode,
         newHTMLStringChunks,
@@ -1708,6 +1744,7 @@ describe("Diff test", () => {
         transition,
         ignoreId,
         registerWC,
+        onNextNode,
       ]) => {
         eval(diffCode as string);
         const encoder = new TextEncoder();
@@ -1736,7 +1773,7 @@ describe("Diff test", () => {
                 }),
               ),
               removedNodes: Array.from(mutation.removedNodes).map(
-                (node, index) => ({
+                (node) => ({
                   nodeName: node.nodeName,
                   nodeValue: node.nodeValue,
                 }),
@@ -1767,7 +1804,7 @@ describe("Diff test", () => {
                 nodeValue: node.nodeValue,
               } as Node);
             }
-          : undefined;
+          : eval(onNextNode);
 
         if (registerWC) {
           class TestWC extends HTMLElement {
@@ -1792,7 +1829,7 @@ describe("Diff test", () => {
 
         observer.disconnect();
 
-        return [allMutations, streamNodes, transitionApplied];
+        return [allMutations, streamNodes, transitionApplied, (window as any).logs];
       },
       [
         diffCode,
@@ -1802,6 +1839,7 @@ describe("Diff test", () => {
         transition,
         ignoreId,
         registerWC,
+        onNextNode,
       ],
     );
 
@@ -1810,6 +1848,7 @@ describe("Diff test", () => {
       mutations,
       streamNodes,
       transitionApplied,
+      logs
     ];
   }
 });
