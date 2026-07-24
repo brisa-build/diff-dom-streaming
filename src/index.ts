@@ -43,11 +43,40 @@ export default async function diff(
     oldNode = (oldNode as Document).documentElement;
   }
 
+  await applyRoot(oldNode, newNode, walker);
+  // The HTML parser can relocate a late chunk's nodes BEFORE the walk frontier
+  // (e.g. table foster parenting), so reconcile once against the settled
+  // document — a cheap pass over an already-converged tree (onNextNode is not
+  // replayed; transitions already ran during the streamed pass).
+  await applyRoot(oldNode, newNode, settledWalker(walker, options));
+}
+
+async function applyRoot(oldNode: Node, newNode: Node, walker: Walker) {
   if (newNode.nodeType === DOCUMENT_FRAGMENT_TYPE) {
     await setChildNodes(oldNode, newNode, walker);
   } else {
     await updateNode(oldNode, newNode, walker);
   }
+}
+
+/** Walker over the fully-parsed streamed document: no waits, no callbacks. */
+function settledWalker(walker: Walker, options: Options = {}): Walker {
+  const hop = (field: "firstChild" | "nextSibling") => async (node: Node) => {
+    let nextNode = node[field];
+
+    while (options.shouldIgnoreNode?.(nextNode)) {
+      nextNode = nextNode!.nextSibling;
+    }
+
+    return nextNode;
+  };
+
+  return {
+    root: walker.root,
+    [FIRST_CHILD]: hop("firstChild"),
+    [NEXT_SIBLING]: hop("nextSibling"),
+    [APPLY_TRANSITION]: (v) => v(),
+  };
 }
 
 /**
@@ -114,9 +143,10 @@ function setAttributes(
     if (oldAttribute.name === "data-action") continue;
 
     if (!newAttribute) {
-      // Add a new attribute.
-      newAttributes.removeNamedItemNS(namespace, name);
-      oldAttributes.setNamedItemNS(oldAttribute);
+      // Add a new attribute — cloned: setNamedItemNS would STEAL the Attr node
+      // from the streamed tree, and the settled reconciliation pass would then
+      // see it missing there and remove it right back.
+      oldAttributes.setNamedItemNS(oldAttribute.cloneNode(true) as Attr);
     } else if (newAttribute.value !== oldAttribute.value) {
       // Update existing attribute.
       newAttribute.value = oldAttribute.value;
@@ -253,8 +283,10 @@ async function htmlStreamWalker(
 
       let nextNode = node[field];
 
+      // Hop over ignored nodes by SIBLING: hopping by `field` would descend
+      // INTO an ignored first child instead of skipping it.
       while (options.shouldIgnoreNode?.(nextNode)) {
-        nextNode = nextNode![field];
+        nextNode = nextNode!.nextSibling;
       }
 
       if (nextNode) await options.onNextNode?.(nextNode);
