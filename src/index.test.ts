@@ -44,8 +44,11 @@ describe("Diff test", () => {
   });
 
   describe("Chrome View Transitions API", () => {
-    it("should not call document.startViewTransition for each DOM update with transition=false", async () => {
+    beforeAll(async () => {
       browser = await engine.chrome.launch();
+    });
+
+    it("should not call document.startViewTransition for each DOM update with transition=false", async () => {
       const [newHTML, , , transitionApplied] = await testDiff({
         oldHTMLString: `
         <div>
@@ -70,7 +73,6 @@ describe("Diff test", () => {
       expect(transitionApplied).toBeFalse();
     });
     it("should call document.startViewTransition for each DOM update with transition=true", async () => {
-      browser = await engine.chrome.launch();
       const [newHTML, , , transitionApplied] = await testDiff({
         oldHTMLString: `
         <div>
@@ -1632,6 +1634,56 @@ describe("Diff test", () => {
           <head></head>
           <body>
               <div>bar</div>
+          </body>
+        </html>
+    `),
+      );
+    });
+
+    it("should options.shouldIgnoreNode skip an ignored node followed by a sibling", async () => {
+      const [newHTML] = await testDiff({
+        oldHTMLString: `
+        <div>
+          <span id="ignore">skip</span>
+          <b>old</b>
+        </div>
+      `,
+        newHTMLStringChunks: [
+          "<html><head></head><body><div><span id='ignore'>skip</span><b>new</b></div></body></html>",
+        ],
+        ignoreId: true,
+      });
+      expect(newHTML).toBe(
+        normalize(`
+        <html>
+          <head></head>
+          <body>
+            <div><b>new</b></div>
+          </body>
+        </html>
+    `),
+      );
+    });
+
+    it("should apply nodes the parser moves before the walk frontier (table foster parenting across chunks)", async () => {
+      const [newHTML] = await testDiff({
+        oldHTMLString: `
+        <div>
+          <table><tbody><tr><td>x</td></tr></tbody></table>
+        </div>
+      `,
+        newHTMLStringChunks: [
+          "<html><head></head><body><div><table><tbody><tr><td>y</td></tr>",
+          "oops</tbody></table></div></body></html>",
+        ],
+        slowChunks: true,
+      });
+      expect(newHTML).toBe(
+        normalize(`
+        <html>
+          <head></head>
+          <body>
+            <div>oops<table><tbody><tr><td>y</td></tr></tbody></table></div>
           </body>
         </html>
     `),
