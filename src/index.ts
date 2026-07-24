@@ -12,6 +12,7 @@ type Walker = {
   [FIRST_CHILD]: (node: Node) => Promise<Node | null>;
   [NEXT_SIBLING]: (node: Node) => Promise<Node | null>;
   [APPLY_TRANSITION]: (v: () => void) => void;
+  [VISITED]: WeakSet<Node>;
 };
 
 type NextNodeCallback = (node: Node) => void;
@@ -28,6 +29,7 @@ const DOCUMENT_FRAGMENT_TYPE = 11;
 const APPLY_TRANSITION = 0;
 const FIRST_CHILD = 1;
 const NEXT_SIBLING = 2;
+const VISITED = 3;
 const SPECIAL_TAGS = new Set(["HTML", "HEAD", "BODY"]);
 const wait = () => new Promise((resolve) => requestAnimationFrame(resolve));
 
@@ -45,10 +47,32 @@ export default async function diff(
 
   await applyRoot(oldNode, newNode, walker);
   // The HTML parser can relocate a late chunk's nodes BEFORE the walk frontier
-  // (e.g. table foster parenting), so reconcile once against the settled
-  // document — a cheap pass over an already-converged tree (onNextNode is not
-  // replayed; transitions already ran during the streamed pass).
-  await applyRoot(oldNode, newNode, settledWalker(walker, options));
+  // (e.g. table foster parenting), leaving nodes the streamed walk never saw.
+  // Only then reconcile once against the settled document (onNextNode is not
+  // replayed; transitions already ran) — fully-walked pages skip this, so DOM
+  // mutations made meanwhile by custom elements/scripts are left alone.
+  if (hasUnvisited(newNode, walker[VISITED], options ?? {})) {
+    await applyRoot(oldNode, newNode, settledWalker(walker, options));
+  }
+}
+
+function hasUnvisited(node: Node | null, visited: WeakSet<Node>, options: Options): boolean {
+  for (; node; node = node.nextSibling) {
+    if (options.shouldIgnoreNode?.(node)) continue;
+    if (!visited.has(node) || hasUnvisited(node.firstChild, visited, options)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/** Clone-inserted subtrees are applied wholesale — count them as walked. */
+function markSubtree(node: Node, visited: WeakSet<Node>) {
+  visited.add(node);
+  for (let child = node.firstChild; child; child = child.nextSibling) {
+    markSubtree(child, visited);
+  }
 }
 
 async function applyRoot(oldNode: Node, newNode: Node, walker: Walker) {
@@ -76,6 +100,7 @@ function settledWalker(walker: Walker, options: Options = {}): Walker {
     [FIRST_CHILD]: hop("firstChild"),
     [NEXT_SIBLING]: hop("nextSibling"),
     [APPLY_TRANSITION]: (v) => v(),
+    [VISITED]: walker[VISITED],
   };
 }
 
@@ -84,6 +109,8 @@ function settledWalker(walker: Walker, options: Options = {}): Walker {
  */
 async function updateNode(oldNode: Node, newNode: Node, walker: Walker) {
   if (oldNode.nodeType !== newNode.nodeType) {
+    markSubtree(newNode, walker[VISITED]);
+
     return walker[APPLY_TRANSITION](() =>
       oldNode.parentNode!.replaceChild(newNode.cloneNode(true), oldNode),
     );
@@ -205,6 +232,7 @@ async function setChildNodes(oldParent: Node, newParent: Node, walker: Walker) {
       checkOld = oldNode;
       oldNode = oldNode.nextSibling;
       if (getKey(checkOld)) {
+        markSubtree(newNode, walker[VISITED]);
         insertedNode = newNode.cloneNode(true);
         walker[APPLY_TRANSITION](() =>
           oldParent.insertBefore(insertedNode!, checkOld!),
@@ -213,6 +241,7 @@ async function setChildNodes(oldParent: Node, newParent: Node, walker: Walker) {
         await updateNode(checkOld, newNode, walker);
       }
     } else {
+      markSubtree(newNode, walker[VISITED]);
       insertedNode = newNode.cloneNode(true);
       walker[APPLY_TRANSITION](() => oldParent.appendChild(insertedNode!));
     }
@@ -277,6 +306,8 @@ async function htmlStreamWalker(
     await wait();
   }
 
+  const visited = new WeakSet<Node>();
+
   function next(field: "firstChild" | "nextSibling") {
     return async (node: Node) => {
       if (!node) return null;
@@ -289,7 +320,10 @@ async function htmlStreamWalker(
         nextNode = nextNode!.nextSibling;
       }
 
-      if (nextNode) await options.onNextNode?.(nextNode);
+      if (nextNode) {
+        visited.add(nextNode);
+        await options.onNextNode?.(nextNode);
+      }
 
       const waitChildren = field === "firstChild";
 
@@ -325,6 +359,8 @@ async function htmlStreamWalker(
       : streamInProgress
   }
 
+  if (doc.documentElement) visited.add(doc.documentElement);
+
   return {
     root: doc.documentElement,
     [FIRST_CHILD]: next("firstChild"),
@@ -335,5 +371,6 @@ async function htmlStreamWalker(
         window.lastDiffTransition = document.startViewTransition(v);
       } else v();
     },
+    [VISITED]: visited,
   };
 }
