@@ -282,29 +282,37 @@ async function htmlStreamWalker(
   const decoderStream = new TextDecoderStream();
   const decoderStreamReader = decoderStream.readable.getReader();
   let streamInProgress = true;
+  let streamError: Error | undefined;
 
-  stream.pipeTo(decoderStream.writable);
+  // The error already surfaces through the reader in processStream; this
+  // only silences the duplicated unhandled rejection.
+  stream.pipeTo(decoderStream.writable).catch(() => {});
   processStream();
 
   async function processStream() {
     try {
       while (true) {
         const { done, value } = await decoderStreamReader.read();
-        if (done) {
-          streamInProgress = false;
-          break;
-        }
+        if (done) break;
 
         doc.write(value);
       }
+    } catch (error) {
+      streamError = error as Error;
     } finally {
+      streamInProgress = false;
       doc.close();
     }
   }
 
-  while (!doc.documentElement || isLastNodeOfChunk(doc.documentElement)) {
+  while (
+    !streamError &&
+    (!doc.documentElement || isLastNodeOfChunk(doc.documentElement))
+  ) {
     await wait();
   }
+
+  if (streamError) throw streamError;
 
   const visited = new WeakSet<Node>();
 
@@ -330,6 +338,8 @@ async function htmlStreamWalker(
       while (isLastNodeOfChunk(nextNode as Element, waitChildren)) {
         await wait();
       }
+
+      if (streamError) throw streamError;
 
       return nextNode;
     };

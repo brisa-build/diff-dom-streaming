@@ -1899,12 +1899,38 @@ describe("Diff test", () => {
       // Executed exactly once (on initial page load), not again after diffing.
       expect(count).toBe(1);
     });
+
+    it("should reject the diff when the stream errors after a chunk instead of hanging the walker", async () => {
+      await expect(
+        testDiff({
+          oldHTMLString: `
+        <div>foo</div>
+      `,
+          newHTMLStringChunks: ["<div>bar</div>"],
+          errorStreamMessage: "network dead",
+          slowChunks: true,
+        }),
+      ).rejects.toThrow("network dead");
+    });
+
+    it("should reject the diff when the stream errors before any chunk", async () => {
+      await expect(
+        testDiff({
+          oldHTMLString: `
+        <div>foo</div>
+      `,
+          newHTMLStringChunks: [],
+          errorStreamMessage: "network dead",
+        }),
+      ).rejects.toThrow("network dead");
+    });
   });
 
   async function testDiff({
     oldHTMLString,
     newHTMLStringChunks = [],
     newHTMLByteChunks,
+    errorStreamMessage,
     useForEeachStreamNode = false,
     slowChunks = false,
     transition = false,
@@ -1918,6 +1944,9 @@ describe("Diff test", () => {
     // boundaries that split multi-byte characters, which cannot be expressed
     // as JS strings.
     newHTMLByteChunks?: number[][];
+    // When set, the stream errors with this message after emitting all chunks
+    // instead of closing (simulates an aborted fetch / dead network).
+    errorStreamMessage?: string;
     useForEeachStreamNode?: boolean;
     slowChunks?: boolean;
     transition?: boolean;
@@ -1931,6 +1960,7 @@ describe("Diff test", () => {
         diffCode,
         newHTMLStringChunks,
         newHTMLByteChunks,
+        errorStreamMessage,
         useForEeachStreamNode,
         slowChunks,
         transition,
@@ -1953,7 +1983,15 @@ describe("Diff test", () => {
                   : encoder.encode(chunk as string),
               );
             }
-            controller.close();
+            if (errorStreamMessage) {
+              // Let the already-enqueued chunks be consumed by the walker
+              // first, so the error lands while it awaits the next chunk.
+              if (slowChunks)
+                await new Promise((resolve) => setTimeout(resolve, 100));
+              controller.error(new Error(errorStreamMessage as string));
+            } else {
+              controller.close();
+            }
           },
         });
         const allMutations: any[] = [];
@@ -2033,6 +2071,7 @@ describe("Diff test", () => {
         diffCode,
         newHTMLStringChunks,
         newHTMLByteChunks,
+        errorStreamMessage,
         useForEeachStreamNode,
         slowChunks,
         transition,
