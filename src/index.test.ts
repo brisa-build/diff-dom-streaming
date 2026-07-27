@@ -1924,6 +1924,115 @@ describe("Diff test", () => {
         }),
       ).rejects.toThrow("network dead");
     });
+
+    it("should apply children of an open last node progressively (main as last child)", async () => {
+      const [newHTML, , , , midStreamH1] = await testDiff({
+        oldHTMLString: `
+        <div class="layout">
+          <nav><a>nav</a></nav>
+          <main><article><h1>OLD</h1><p>para OLD</p><p>tail</p></article></main>
+        </div>
+      `,
+        newHTMLStringChunks: [
+          '<div class="layout"><nav><a>nav</a></nav><main><article><h1>NEW</h1><p>para NEW</p>',
+          "<p>tail</p></article></main></div>",
+        ],
+        midStreamEval: `document.querySelector('h1').textContent`,
+      });
+
+      // The <main> subtree must be diffed WHILE the stream is still open,
+      // even though <main> is the last child of a still-open container.
+      expect(midStreamH1).toBe("NEW");
+      expect(newHTML).toBe(
+        normalize(`
+        <html>
+          <head></head>
+          <body>
+            <div class="layout">
+              <nav><a>nav</a></nav>
+              <main><article><h1>NEW</h1><p>para NEW</p><p>tail</p></article></main>
+            </div>
+          </body>
+        </html>
+      `),
+      );
+    });
+
+    it("should apply an open last node progressively and still ADD trailing siblings from a later chunk", async () => {
+      const [newHTML, , , , midStreamH1] = await testDiff({
+        oldHTMLString: `
+        <div class="layout">
+          <nav><a>nav</a></nav>
+          <main><article><h1>OLD</h1><p>tail</p></article></main>
+        </div>
+      `,
+        newHTMLStringChunks: [
+          '<div class="layout"><nav><a>nav</a></nav><main><article><h1>NEW</h1><p>tail</p>',
+          "</article></main><footer>bye</footer></div>",
+        ],
+        midStreamEval: `document.querySelector('h1').textContent`,
+      });
+
+      expect(midStreamH1).toBe("NEW");
+      expect(newHTML).toBe(
+        normalize(`
+        <html>
+          <head></head>
+          <body>
+            <div class="layout">
+              <nav><a>nav</a></nav>
+              <main><article><h1>NEW</h1><p>tail</p></article></main>
+              <footer>bye</footer>
+            </div>
+          </body>
+        </html>
+      `),
+      );
+    });
+
+    it("should defer pruning of trailing old nodes until the open level is closed", async () => {
+      const [newHTML, , , , midStream] = await testDiff({
+        oldHTMLString: `
+        <div class="layout">
+          <nav><a>nav</a></nav>
+          <main><article><h1>OLD</h1><p>tail</p></article></main>
+          <footer>bye</footer>
+          <aside>ads</aside>
+        </div>
+      `,
+        newHTMLStringChunks: [
+          '<div class="layout"><nav><a>nav</a></nav><main><article><h1>NEW</h1><p>tail</p>',
+          "</article></main></div>",
+        ],
+        midStreamEval: `JSON.stringify({
+          h1: document.querySelector('h1').textContent,
+          footer: !!document.querySelector('footer'),
+          aside: !!document.querySelector('aside'),
+        })`,
+      });
+
+      // Mid-stream: the open subtree is already applied, but the trailing old
+      // nodes are NOT pruned yet — the level may still receive new children.
+      expect(JSON.parse(midStream)).toEqual({
+        h1: "NEW",
+        footer: true,
+        aside: true,
+      });
+      // Once the stream closes, the deferred pruning runs.
+      expect(newHTML).toBe(
+        normalize(`
+        <html>
+          <head></head>
+          <body>
+            <div class="layout">
+              <nav><a>nav</a></nav>
+              <main><article><h1>NEW</h1><p>tail</p></article></main>
+            </div>
+          </body>
+        </html>
+      `),
+      );
+    });
   });
 
   async function testDiff({
@@ -1931,6 +2040,7 @@ describe("Diff test", () => {
     newHTMLStringChunks = [],
     newHTMLByteChunks,
     errorStreamMessage,
+    midStreamEval,
     useForEeachStreamNode = false,
     slowChunks = false,
     transition = false,
@@ -1947,20 +2057,24 @@ describe("Diff test", () => {
     // When set, the stream errors with this message after emitting all chunks
     // instead of closing (simulates an aborted fetch / dead network).
     errorStreamMessage?: string;
+    // JS expression evaluated in the page BEFORE enqueuing the last chunk
+    // (after a settle delay), to observe the mid-stream DOM state.
+    midStreamEval?: string;
     useForEeachStreamNode?: boolean;
     slowChunks?: boolean;
     transition?: boolean;
     ignoreId?: boolean;
     registerWC?: boolean;
     onNextNode?: string
-  }): Promise<[string, any[], Node[], boolean, string]> {
+  }): Promise<[string, any[], Node[], boolean, any, string]> {
     await page.setContent(normalize(oldHTMLString));
-    const [mutations, streamNodes, transitionApplied, logs] = await page.evaluate(
+    const [mutations, streamNodes, transitionApplied, midStreamResult, logs] = await page.evaluate(
       async ([
         diffCode,
         newHTMLStringChunks,
         newHTMLByteChunks,
         errorStreamMessage,
+        midStreamEval,
         useForEeachStreamNode,
         slowChunks,
         transition,
@@ -1972,11 +2086,19 @@ describe("Diff test", () => {
         const encoder = new TextEncoder();
         const byteChunks = newHTMLByteChunks as number[][] | undefined;
         const chunks = byteChunks ?? (newHTMLStringChunks as string[]);
+        let midStreamResult;
         const readable = new ReadableStream({
           start: async (controller) => {
-            for (const chunk of chunks) {
+            for (let i = 0; i < chunks.length; i++) {
               if (slowChunks)
                 await new Promise((resolve) => setTimeout(resolve, 100));
+              if (midStreamEval && i === chunks.length - 1) {
+                // Let the walker settle on the already-emitted chunks before
+                // observing the mid-stream DOM state.
+                await new Promise((resolve) => setTimeout(resolve, 500));
+                midStreamResult = eval(midStreamEval as string);
+              }
+              const chunk = chunks[i];
               controller.enqueue(
                 byteChunks
                   ? new Uint8Array(chunk as number[])
@@ -2065,13 +2187,14 @@ describe("Diff test", () => {
 
         observer.disconnect();
 
-        return [allMutations, streamNodes, transitionApplied, (window as any).logs];
+        return [allMutations, streamNodes, transitionApplied, midStreamResult, (window as any).logs];
       },
       [
         diffCode,
         newHTMLStringChunks,
         newHTMLByteChunks,
         errorStreamMessage,
+        midStreamEval,
         useForEeachStreamNode,
         slowChunks,
         transition,
@@ -2086,6 +2209,7 @@ describe("Diff test", () => {
       mutations,
       streamNodes,
       transitionApplied,
+      midStreamResult,
       logs
     ];
   }
