@@ -1,7 +1,3 @@
-/// <reference no-default-lib="true" />
-/// <reference lib="esnext" />
-/// <reference lib="dom" />
-/// <reference lib="dom.iterable" />
 /**
  * This file contains a diffing algorithm that is used to update the DOM
  * inspired by the set-dom library https://github.com/DylanPiercey/set-dom

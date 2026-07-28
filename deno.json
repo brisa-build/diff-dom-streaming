@@ -5,6 +5,9 @@
     ".": "./src/index.ts",
     "./types": "./index.d.ts"
   },
+  "compilerOptions": {
+    "lib": ["esnext", "dom", "dom.iterable"]
+  },
   "description": "Diff DOM algorithm with streaming. Gets all modifications, insertions and removals between a DOM fragment and a stream HTML reader.",
   "keywords": ["diff", "dom", "streaming", "html", "reader"],
   "publish": {
