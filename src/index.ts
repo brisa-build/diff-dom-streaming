@@ -13,6 +13,7 @@ type Walker = {
   [NEXT_SIBLING]: (node: Node) => Promise<Node | null>;
   [APPLY_TRANSITION]: (v: () => void) => void;
   [VISITED]: WeakSet<Node>;
+  [SETTLE]: (node: Node) => Promise<void>;
 };
 
 type NextNodeCallback = (node: Node) => void;
@@ -30,6 +31,7 @@ const APPLY_TRANSITION = 0;
 const FIRST_CHILD = 1;
 const NEXT_SIBLING = 2;
 const VISITED = 3;
+const SETTLE = 4;
 const SPECIAL_TAGS = new Set(["HTML", "HEAD", "BODY"]);
 const wait = () => new Promise((resolve) => requestAnimationFrame(resolve));
 
@@ -101,6 +103,7 @@ function settledWalker(walker: Walker, options: Options = {}): Walker {
     [NEXT_SIBLING]: hop("nextSibling"),
     [APPLY_TRANSITION]: (v) => v(),
     [VISITED]: walker[VISITED],
+    [SETTLE]: async () => {},
   };
 }
 
@@ -109,6 +112,7 @@ function settledWalker(walker: Walker, options: Options = {}): Walker {
  */
 async function updateNode(oldNode: Node, newNode: Node, walker: Walker) {
   if (oldNode.nodeType !== newNode.nodeType) {
+    await walker[SETTLE](newNode);
     markSubtree(newNode, walker[VISITED]);
 
     return walker[APPLY_TRANSITION](() =>
@@ -232,6 +236,7 @@ async function setChildNodes(oldParent: Node, newParent: Node, walker: Walker) {
       checkOld = oldNode;
       oldNode = oldNode.nextSibling;
       if (getKey(checkOld)) {
+        await walker[SETTLE](newNode);
         markSubtree(newNode, walker[VISITED]);
         insertedNode = newNode.cloneNode(true);
         walker[APPLY_TRANSITION](() =>
@@ -241,6 +246,7 @@ async function setChildNodes(oldParent: Node, newParent: Node, walker: Walker) {
         await updateNode(checkOld, newNode, walker);
       }
     } else {
+      await walker[SETTLE](newNode);
       markSubtree(newNode, walker[VISITED]);
       insertedNode = newNode.cloneNode(true);
       walker[APPLY_TRANSITION](() => oldParent.appendChild(insertedNode!));
@@ -282,29 +288,37 @@ async function htmlStreamWalker(
   const decoderStream = new TextDecoderStream();
   const decoderStreamReader = decoderStream.readable.getReader();
   let streamInProgress = true;
+  let streamError: Error | undefined;
 
-  stream.pipeTo(decoderStream.writable);
+  // The error already surfaces through the reader in processStream; this
+  // only silences the duplicated unhandled rejection.
+  stream.pipeTo(decoderStream.writable).catch(() => {});
   processStream();
 
   async function processStream() {
     try {
       while (true) {
         const { done, value } = await decoderStreamReader.read();
-        if (done) {
-          streamInProgress = false;
-          break;
-        }
+        if (done) break;
 
         doc.write(value);
       }
+    } catch (error) {
+      streamError = error as Error;
     } finally {
+      streamInProgress = false;
       doc.close();
     }
   }
 
-  while (!doc.documentElement || isLastNodeOfChunk(doc.documentElement)) {
+  while (
+    !streamError &&
+    (!doc.documentElement || isLastNodeOfChunk(doc.documentElement))
+  ) {
     await wait();
   }
+
+  if (streamError) throw streamError;
 
   const visited = new WeakSet<Node>();
 
@@ -312,12 +326,27 @@ async function htmlStreamWalker(
     return async (node: Node) => {
       if (!node) return null;
 
-      let nextNode = node[field];
+      const hop = () => {
+        let nextNode = node[field];
 
-      // Hop over ignored nodes by SIBLING: hopping by `field` would descend
-      // INTO an ignored first child instead of skipping it.
-      while (options.shouldIgnoreNode?.(nextNode)) {
-        nextNode = nextNode!.nextSibling;
+        // Hop over ignored nodes by SIBLING: hopping by `field` would descend
+        // INTO an ignored first child instead of skipping it.
+        while (options.shouldIgnoreNode?.(nextNode)) {
+          nextNode = nextNode!.nextSibling;
+        }
+
+        return nextNode;
+      };
+
+      let nextNode = hop();
+
+      // A null hop FROM the parser's frontier is not the end of the level:
+      // the parent is still open, so later chunks may still add nodes here.
+      // Waiting defers the pruning at the end of setChildNodes until the
+      // level is closed (or the stream ends/errors).
+      while (!nextNode && isLastNodeOfChunk(node)) {
+        await wait();
+        nextNode = hop();
       }
 
       if (nextNode) {
@@ -325,11 +354,15 @@ async function htmlStreamWalker(
         await options.onNextNode?.(nextNode);
       }
 
-      const waitChildren = field === "firstChild";
-
-      while (isLastNodeOfChunk(nextNode as Element, waitChildren)) {
+      // Wait only while the node is the parser's frontier AND has no children
+      // yet: a frontier node with children can already be diffed progressively
+      // (its own hops wait as needed), instead of stalling the whole subtree
+      // until the stream closes.
+      while (isLastNodeOfChunk(nextNode as Element, true)) {
         await wait();
       }
+
+      if (streamError) throw streamError;
 
       return nextNode;
     };
@@ -372,5 +405,14 @@ async function htmlStreamWalker(
       } else v();
     },
     [VISITED]: visited,
+    // Waits until the node stops being the parser's frontier (or the stream
+    // ends), so cloning it deeply cannot snapshot a half-parsed subtree.
+    [SETTLE]: async (node: Node) => {
+      while (isLastNodeOfChunk(node)) {
+        await wait();
+      }
+
+      if (streamError) throw streamError;
+    },
   };
 }
