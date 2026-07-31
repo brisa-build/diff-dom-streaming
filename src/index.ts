@@ -29,7 +29,24 @@ const NEXT_SIBLING = 2;
 const VISITED = 3;
 const SETTLE = 4;
 const SPECIAL_TAGS = new Set(["HTML", "HEAD", "BODY"]);
-const wait = () => new Promise((resolve) => requestAnimationFrame(resolve));
+
+/**
+ * A frame — or a timer, when frames are not coming.
+ *
+ * `requestAnimationFrame` does not fire while the document is
+ * rendering-suppressed, which is exactly what the View Transition API does to
+ * it while an update callback runs. A caller that wraps a whole diff in
+ * `document.startViewTransition` (the only way to pair shared
+ * `view-transition-name` elements across a full page change) would otherwise
+ * deadlock here until the browser abandons the transition on its DOM-update
+ * timeout: the page freezes for seconds and then swaps with no animation.
+ *
+ * Racing a timer against the frame fixes that without changing the normal
+ * path — outside a transition the frame arrives first — and it also keeps the
+ * walk moving in a background tab, where frames are throttled away too.
+ */
+const wait = () =>
+  new Promise((resolve) => (requestAnimationFrame(resolve), setTimeout(resolve, 16)));
 
 export default async function diff(
   oldNode: Node,
