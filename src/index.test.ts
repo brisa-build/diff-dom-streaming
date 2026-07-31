@@ -96,6 +96,58 @@ describe("Diff test", () => {
       );
       expect(transitionApplied).toBeTrue();
     });
+
+    /**
+     * A router wrapping the whole swap in one transition, rather than letting
+     * `transition: true` start one per DOM update — the only way shared
+     * `view-transition-name` elements are paired across a full page change.
+     *
+     * A view transition suppresses rendering until its update callback
+     * resolves, so `requestAnimationFrame` never fires inside one. Settling the
+     * stream on rAF alone therefore deadlocks the walk until the browser aborts
+     * the transition on its 4s DOM-update timeout: the page freezes for four
+     * seconds and then swaps with no animation at all.
+     */
+    it("should complete a diff that runs inside document.startViewTransition", async () => {
+      await page.setContent(normalize(`<div><h1>hello world</h1></div>`));
+
+      const result = await page.evaluate(async (code) => {
+        eval(code as string);
+        const encoder = new TextEncoder();
+        const readable = new ReadableStream({
+          start(controller) {
+            for (const chunk of ["<div>", "<h1>hello world!</h1>", "</div>"]) {
+              controller.enqueue(encoder.encode(chunk));
+            }
+            controller.close();
+          },
+        });
+        const startedAt = performance.now();
+        // @ts-ignore
+        const transition = document.startViewTransition(() =>
+          // @ts-ignore
+          diff(document.documentElement!, readable),
+        );
+
+        transition.finished.catch(() => {});
+        await transition.updateCallbackDone;
+
+        return {
+          elapsed: performance.now() - startedAt,
+          ready: await transition.ready.then(
+            () => "resolved",
+            (error: any) => `rejected: ${error?.name}`,
+          ),
+          heading: document.querySelector("h1")?.textContent,
+        };
+      }, diffCode);
+
+      expect(result.heading).toBe("hello world!");
+      // Not aborted: a timed-out transition applies the DOM change but never animates.
+      expect(result.ready).toBe("resolved");
+      // The deadlock ended at Chrome's 4s cap; a working swap is milliseconds.
+      expect(result.elapsed).toBeLessThan(2000);
+    });
   });
 
   describe.each(["chrome", "firefox", "safari"])("%s", (browserName) => {
