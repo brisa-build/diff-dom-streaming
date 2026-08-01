@@ -90,7 +90,9 @@ type Options = {
   onNextNode?: NextNodeCallback;
   // update the DOM using document.startViewTransition (default: false)
   transition?: boolean;
-  // callback to ignore nodes (default: undefined)
+  // callback to leave nodes alone, on both the old and the new tree: an
+  // ignored node is never updated, moved or removed, and never counts as one
+  // of the old children the diff has to prune (default: undefined)
   shouldIgnoreNode?: (node: Node | null) => boolean;
 };
 ```

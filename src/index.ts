@@ -10,6 +10,7 @@ type Walker = {
   [APPLY_TRANSITION]: (v: () => void) => void;
   [VISITED]: WeakSet<Node>;
   [SETTLE]: (node: Node) => Promise<void>;
+  [IGNORED]: (node: Node | null) => unknown;
 };
 
 type NextNodeCallback = (node: Node) => void;
@@ -28,6 +29,7 @@ const FIRST_CHILD = 1;
 const NEXT_SIBLING = 2;
 const VISITED = 3;
 const SETTLE = 4;
+const IGNORED = 5;
 const SPECIAL_TAGS = new Set(["HTML", "HEAD", "BODY"]);
 
 /**
@@ -111,11 +113,10 @@ function settledWalker(walker: Walker, options: Options = {}): Walker {
   };
 
   return {
-    root: walker.root,
+    ...walker,
     [FIRST_CHILD]: hop("firstChild"),
     [NEXT_SIBLING]: hop("nextSibling"),
     [APPLY_TRANSITION]: (v) => v(),
-    [VISITED]: walker[VISITED],
     [SETTLE]: async () => {},
   };
 }
@@ -213,10 +214,13 @@ async function setChildNodes(oldParent: Node, newParent: Node, walker: Walker) {
 
   // Extract keyed nodes from previous children and keep track of total count.
   while (oldNode) {
-    extra++;
     checkOld = oldNode;
-    oldKey = getKey(checkOld);
     oldNode = oldNode.nextSibling;
+    // An ignored node is not the diff's to account for: counting it inflates
+    // `extra`, and the tail removal below then takes one node too many.
+    if (walker[IGNORED](checkOld)) continue;
+    extra++;
+    oldKey = getKey(checkOld);
 
     if (oldKey) {
       if (!keyedNodes) keyedNodes = {};
@@ -224,7 +228,16 @@ async function setChildNodes(oldParent: Node, newParent: Node, walker: Walker) {
     }
   }
 
-  oldNode = oldParent.firstChild;
+  // Ignored nodes are invisible to the walk as well as to the removal: matched
+  // against an incoming node they would be rewritten into it, which is the one
+  // thing the caller asked not to happen.
+  const nextOwn = (node: ChildNode | null) => {
+    while (node && walker[IGNORED](node)) node = node.nextSibling;
+
+    return node;
+  };
+
+  oldNode = nextOwn(oldParent.firstChild);
 
   // Loop over new nodes and perform updates.
   while (newNode) {
@@ -241,13 +254,13 @@ async function setChildNodes(oldParent: Node, newParent: Node, walker: Walker) {
           oldParent.insertBefore(foundNode!, oldNode),
         );
       } else {
-        oldNode = oldNode.nextSibling;
+        oldNode = nextOwn(oldNode.nextSibling);
       }
 
       await updateNode(foundNode, newNode, walker);
     } else if (oldNode) {
       checkOld = oldNode;
-      oldNode = oldNode.nextSibling;
+      oldNode = nextOwn(oldNode.nextSibling);
       if (getKey(checkOld)) {
         await walker[SETTLE](newNode);
         markSubtree(newNode, walker[VISITED]);
@@ -279,8 +292,17 @@ async function setChildNodes(oldParent: Node, newParent: Node, walker: Walker) {
       oldParent.removeChild(keyedNodes![oldKey]!);
     }
 
-    // If we have any remaining unkeyed nodes remove them from the end.
-    while (--extra >= 0) oldParent.removeChild(oldParent.lastChild!);
+    // If we have any remaining unkeyed nodes remove them from the end,
+    // stepping over the ignored ones: a runtime-injected `<style>` sitting at
+    // the end of `<head>` is exactly what `shouldIgnoreNode` is asked to
+    // protect, and detaching it makes the page paint unstyled.
+    while (--extra >= 0) {
+      let doomed = oldParent.lastChild;
+
+      while (doomed && walker[IGNORED](doomed)) doomed = doomed.previousSibling;
+      if (!doomed) break;
+      oldParent.removeChild(doomed);
+    }
   });
 }
 
@@ -418,6 +440,7 @@ async function htmlStreamWalker(
       } else v();
     },
     [VISITED]: visited,
+    [IGNORED]: (node) => options.shouldIgnoreNode?.(node),
     // Waits until the node stops being the parser's frontier (or the stream
     // ends), so cloning it deeply cannot snapshot a half-parsed subtree.
     [SETTLE]: async (node: Node) => {

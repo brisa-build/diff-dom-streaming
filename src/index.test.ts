@@ -1680,12 +1680,14 @@ describe("Diff test", () => {
         ],
         ignoreId: true,
       });
+      // Ignored means untouched: the node keeps its own content ("bar", not the
+      // incoming "bazz!") and stays put, while its siblings diff as usual.
       expect(newHTML).toBe(
         normalize(`
         <html>
           <head></head>
           <body>
-              <div>bar</div>
+              <div>bar<div id="ignore">bar</div></div>
           </body>
         </html>
     `),
@@ -1710,7 +1712,36 @@ describe("Diff test", () => {
         <html>
           <head></head>
           <body>
-            <div><b>new</b></div>
+            <div><span id="ignore">skip</span><b>new</b></div>
+          </body>
+        </html>
+    `),
+      );
+    });
+
+    it("should options.shouldIgnoreNode keep an ignored node the incoming page does not list", async () => {
+      // The reason the option exists: a stylesheet injected at runtime (a lazy
+      // editor's CSS, a dev server's <style>) lives only in the live document,
+      // so the incoming page is always one node shorter. Counting it made the
+      // tail removal take it, and re-attaching a detached stylesheet leaves it
+      // pending — the page paints unstyled for a frame.
+      const [newHTML] = await testDiff({
+        oldHTMLString: `
+        <div>
+          <b>old</b>
+          <span id="ignore">injected</span>
+        </div>
+      `,
+        newHTMLStringChunks: ["<html><head></head><body><div><b>new</b></div></body></html>"],
+        ignoreId: true,
+      });
+
+      expect(newHTML).toBe(
+        normalize(`
+        <html>
+          <head></head>
+          <body>
+            <div><b>new</b><span id="ignore">injected</span></div>
           </body>
         </html>
     `),
