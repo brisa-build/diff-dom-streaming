@@ -10,7 +10,7 @@ type Walker = {
   [APPLY_TRANSITION]: (v: () => void) => void;
   [VISITED]: WeakSet<Node>;
   [SETTLE]: (node: Node) => Promise<void>;
-  [IGNORED]: (node: Node | null) => boolean;
+  [IGNORED]: (node: Node | null) => unknown;
 };
 
 type NextNodeCallback = (node: Node) => void;
@@ -113,13 +113,11 @@ function settledWalker(walker: Walker, options: Options = {}): Walker {
   };
 
   return {
-    root: walker.root,
+    ...walker,
     [FIRST_CHILD]: hop("firstChild"),
     [NEXT_SIBLING]: hop("nextSibling"),
     [APPLY_TRANSITION]: (v) => v(),
-    [VISITED]: walker[VISITED],
     [SETTLE]: async () => {},
-    [IGNORED]: walker[IGNORED],
   };
 }
 
@@ -298,14 +296,11 @@ async function setChildNodes(oldParent: Node, newParent: Node, walker: Walker) {
     // stepping over the ignored ones: a runtime-injected `<style>` sitting at
     // the end of `<head>` is exactly what `shouldIgnoreNode` is asked to
     // protect, and detaching it makes the page paint unstyled.
-    let last = oldParent.lastChild;
-
     while (--extra >= 0) {
-      while (last && walker[IGNORED](last)) last = last.previousSibling;
-      if (!last) break;
-      const doomed = last;
+      let doomed = oldParent.lastChild;
 
-      last = last.previousSibling;
+      while (doomed && walker[IGNORED](doomed)) doomed = doomed.previousSibling;
+      if (!doomed) break;
       oldParent.removeChild(doomed);
     }
   });
@@ -445,7 +440,7 @@ async function htmlStreamWalker(
       } else v();
     },
     [VISITED]: visited,
-    [IGNORED]: (node) => !!options.shouldIgnoreNode?.(node),
+    [IGNORED]: (node) => options.shouldIgnoreNode?.(node),
     // Waits until the node stops being the parser's frontier (or the stream
     // ends), so cloning it deeply cannot snapshot a half-parsed subtree.
     [SETTLE]: async (node: Node) => {
