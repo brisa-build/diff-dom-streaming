@@ -94,6 +94,13 @@ type Options = {
   // ignored node is never updated, moved or removed, and never counts as one
   // of the old children the diff has to prune (default: undefined)
   shouldIgnoreNode?: (node: Node | null) => boolean;
+  // callback to declare a node's children as another renderer's (a live
+  // embedded React root): the node itself still diffs — attributes sync as
+  // usual — but the diff never walks into its subtree, and a replacement by
+  // a different element never inherits (re-parents) those children. Called
+  // with nodes from BOTH trees, so the answer must come from the node itself
+  // (tag name, attributes), not from external identity (default: undefined)
+  shouldSkipChildren?: (node: Node | null) => boolean;
 };
 ```
 

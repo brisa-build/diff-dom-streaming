@@ -1748,6 +1748,100 @@ describe("Diff test", () => {
       );
     });
 
+    it("should options.shouldSkipChildren keep the old subtree while syncing the node's attributes", async () => {
+      // What an embedded framework root (a live React island) needs: the diff
+      // must not rewrite DOM another renderer owns — its fibers keep node
+      // references and later reconciliations bail out against text the morph
+      // changed behind their back, or throw removeChild on nodes it moved.
+      // The host element itself still belongs to the page (attributes sync);
+      // only its children are out of the diff's scope.
+      const [newHTML] = await testDiff({
+        oldHTMLString: `
+        <div>
+          <section data-skip-children="x" data-v="1"><span>client</span></section>
+          <p>old</p>
+        </div>
+      `,
+        newHTMLStringChunks: [
+          "<html><head></head><body><div><section data-skip-children='x' data-v='2'><span>server</span></section><p>new</p></div></body></html>",
+        ],
+        skipChildren: true,
+      });
+
+      expect(newHTML).toBe(
+        normalize(`
+        <html>
+          <head></head>
+          <body>
+            <div><section data-skip-children="x" data-v="2"><span>client</span></section><p>new</p></div>
+          </body>
+        </html>
+    `),
+      );
+    });
+
+    it("should options.shouldSkipChildren hold across chunk boundaries inside the skipped subtree", async () => {
+      // The skipped subtree may still be streaming when the walk reaches it:
+      // its children must neither be awaited (the walk moves on) nor applied
+      // once they arrive — including the settled reconciliation pass, which
+      // must not count them as unvisited work.
+      const [newHTML] = await testDiff({
+        oldHTMLString: `
+        <div>
+          <section data-skip-children="x"><span>client</span></section>
+          <p>old</p>
+        </div>
+      `,
+        newHTMLStringChunks: [
+          "<html><head></head><body><div><section data-skip-children='x'><span>ser",
+          "ver</span><i>extra</i></section><p>new</p></div></body></html>",
+        ],
+        skipChildren: true,
+      });
+
+      expect(newHTML).toBe(
+        normalize(`
+        <html>
+          <head></head>
+          <body>
+            <div><section data-skip-children="x"><span>client</span></section><p>new</p></div>
+          </body>
+        </html>
+    `),
+      );
+    });
+
+    it("should options.shouldSkipChildren never donate the old children to a different replacing element", async () => {
+      // Positional match against a DIFFERENT tag replaces the node, and the
+      // replacement normally inherits the old (already-diffed) children. A
+      // skipped node's children were never diffed and still belong to their
+      // renderer: moving them re-parents DOM its internal tree references
+      // (unmount then throws removeChild), so the incoming subtree applies
+      // wholesale and the old children leave the document with their node.
+      const [newHTML] = await testDiff({
+        oldHTMLString: `
+        <div>
+          <section data-skip-children="x"><span>client</span></section>
+        </div>
+      `,
+        newHTMLStringChunks: [
+          "<html><head></head><body><div><article><b>fresh</b></article></div></body></html>",
+        ],
+        skipChildren: true,
+      });
+
+      expect(newHTML).toBe(
+        normalize(`
+        <html>
+          <head></head>
+          <body>
+            <div><article><b>fresh</b></article></div>
+          </body>
+        </html>
+    `),
+      );
+    });
+
     it("should apply nodes the parser moves before the walk frontier (table foster parenting across chunks)", async () => {
       const [newHTML] = await testDiff({
         oldHTMLString: `
@@ -2128,6 +2222,7 @@ describe("Diff test", () => {
     slowChunks = false,
     transition = false,
     ignoreId = false,
+    skipChildren = false,
     registerWC = false,
     onNextNode,
   }: {
@@ -2147,6 +2242,7 @@ describe("Diff test", () => {
     slowChunks?: boolean;
     transition?: boolean;
     ignoreId?: boolean;
+    skipChildren?: boolean;
     registerWC?: boolean;
     onNextNode?: string
   }): Promise<[string, any[], Node[], boolean, any, string]> {
@@ -2162,6 +2258,7 @@ describe("Diff test", () => {
         slowChunks,
         transition,
         ignoreId,
+        skipChildren,
         registerWC,
         onNextNode,
       ]) => {
@@ -2263,6 +2360,10 @@ describe("Diff test", () => {
             if (!ignoreId) return false;
             return (node as Element)?.id === "ignore";
           },
+          shouldSkipChildren(node: Node) {
+            if (!skipChildren) return false;
+            return !!(node as Element)?.hasAttribute?.("data-skip-children");
+          },
         });
 
         // @ts-ignore
@@ -2282,6 +2383,7 @@ describe("Diff test", () => {
         slowChunks,
         transition,
         ignoreId,
+        skipChildren,
         registerWC,
         onNextNode,
       ],

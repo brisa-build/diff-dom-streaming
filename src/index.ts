@@ -11,6 +11,7 @@ type Walker = {
   [VISITED]: WeakSet<Node>;
   [SETTLE]: (node: Node) => Promise<void>;
   [IGNORED]: (node: Node | null) => unknown;
+  [SKIP_CHILDREN]: (node: Node | null) => unknown;
 };
 
 type NextNodeCallback = (node: Node) => void;
@@ -19,6 +20,15 @@ type Options = {
   onNextNode?: NextNodeCallback;
   transition?: boolean;
   shouldIgnoreNode?: (node: Node | null) => boolean;
+  /**
+   * The node's children belong to another renderer (a live embedded React
+   * root): the diff updates the node itself — attributes sync as usual — but
+   * never walks into its subtree, so DOM that renderer's internal tree still
+   * references is not rewritten or moved behind its back. Called with nodes
+   * from BOTH the live and the incoming tree, so the answer must come from
+   * the node itself (tag name, attributes), not from external identity.
+   */
+  shouldSkipChildren?: (node: Node | null) => boolean;
 };
 
 const ELEMENT_TYPE = 1;
@@ -30,6 +40,7 @@ const NEXT_SIBLING = 2;
 const VISITED = 3;
 const SETTLE = 4;
 const IGNORED = 5;
+const SKIP_CHILDREN = 6;
 const SPECIAL_TAGS = new Set(["HTML", "HEAD", "BODY"]);
 
 /**
@@ -76,9 +87,11 @@ export default async function diff(
 function hasUnvisited(node: Node | null, visited: WeakSet<Node>, options: Options): boolean {
   for (; node; node = node.nextSibling) {
     if (options.shouldIgnoreNode?.(node)) continue;
-    if (!visited.has(node) || hasUnvisited(node.firstChild, visited, options)) {
-      return true;
-    }
+    if (!visited.has(node)) return true;
+    // A skipped subtree may still be streaming when its host is walked, so its
+    // late children are unvisited by design — not pending work to reconcile.
+    if (options.shouldSkipChildren?.(node)) continue;
+    if (hasUnvisited(node.firstChild, visited, options)) return true;
   }
 
   return false;
@@ -135,7 +148,26 @@ async function updateNode(oldNode: Node, newNode: Node, walker: Walker) {
   }
 
   if (oldNode.nodeType === ELEMENT_TYPE) {
-    await setChildNodes(oldNode, newNode, walker);
+    const skipChildren = !!walker[SKIP_CHILDREN](oldNode);
+
+    // Children owned by another renderer are not the diff's to walk; the
+    // incoming ones count as applied so the settled pass leaves them alone too.
+    if (skipChildren) markSubtree(newNode, walker[VISITED]);
+    else await setChildNodes(oldNode, newNode, walker);
+
+    // A skipped node replaced by a DIFFERENT element must not donate its
+    // children through the transplant below: another renderer still
+    // references them, and re-parenting makes its own teardown throw
+    // removeChild. The incoming subtree applies wholesale instead, and the
+    // old children leave the document attached to their old node.
+    if (skipChildren && oldNode.nodeName !== newNode.nodeName) {
+      await walker[SETTLE](newNode);
+      markSubtree(newNode, walker[VISITED]);
+
+      return walker[APPLY_TRANSITION](() =>
+        oldNode.parentNode!.replaceChild(newNode.cloneNode(true), oldNode),
+      );
+    }
 
     walker[APPLY_TRANSITION](() => {
       if (oldNode.nodeName === newNode.nodeName) {
@@ -441,6 +473,7 @@ async function htmlStreamWalker(
     },
     [VISITED]: visited,
     [IGNORED]: (node) => options.shouldIgnoreNode?.(node),
+    [SKIP_CHILDREN]: (node) => options.shouldSkipChildren?.(node),
     // Waits until the node stops being the parser's frontier (or the stream
     // ends), so cloning it deeply cannot snapshot a half-parsed subtree.
     [SETTLE]: async (node: Node) => {
